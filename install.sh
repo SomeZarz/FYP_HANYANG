@@ -19,7 +19,7 @@ read -rp "Enter selection [1-2, 0 to exit]: " choice
 case "$choice" in
   1)
     echo "Running Arch Linux installer..."
-    "${INSTALL_DIR}/ds_b580.sh"
+    "${INSTALL_DIR}/ds_b580_arch.sh"
     ;;
   2)
     echo "Running macOS installer..."

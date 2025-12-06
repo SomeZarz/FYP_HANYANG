@@ -40,7 +40,6 @@ fi
 
 echo -e "\nActivating VE & PIP install"
 source "fyp_hanyang/bin/activate"
-python -m pip
 # Core PyTorch + vision/audio
 pip install torch==2.9.1 torchaudio==2.9.1 torchvision==0.24.1
 # Data / ML stack
