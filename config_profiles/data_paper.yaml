@@ -1,5 +1,6 @@
 # --- Dataset Processing ---
 processing:
+  vehicle_batch_size: 6 # MacOS = 8, B580 = 16
   min_rest_hours: 1.0
   min_charging_records: 100
   max_gap_seconds: 60

@@ -158,8 +158,8 @@ def save_checkpoint(checkpoint_path: Path, checkpoint: Dict[str, Any]):
         json.dump(checkpoint, f, indent=2)
     temp_path.replace(checkpoint_path)
 
-def process_vehicle(csv_path: Path, config: Dict[str, Any], hdf5_file: h5py.File) -> Dict[str, Any]:
-    """Process one vehicle CSV and append features to HDF5."""
+def process_vehicle(csv_path: Path, config: Dict[str, Any], hdf5_file=None) -> Dict[str, Any]:
+    """Process one vehicle CSV and return features dict."""
     vehicle_id = csv_path.stem
     
     try:
@@ -167,10 +167,7 @@ def process_vehicle(csv_path: Path, config: Dict[str, Any], hdf5_file: h5py.File
         df = pd.read_csv(csv_path)
         df['vehicle_id'] = vehicle_id
         
-        # Import here to avoid circular dependency
         from . import data_extract
-        
-        # Extract all features
         features = data_extract.extract_all_features(df, config)
         
         # Handle no valid segments
@@ -178,29 +175,31 @@ def process_vehicle(csv_path: Path, config: Dict[str, Any], hdf5_file: h5py.File
             return {
                 'vehicle_id': vehicle_id,
                 'samples_extracted': 0,
-                'status': 'no_valid_segments'
+                'status': 'no_valid_segments',
+                # Add empty arrays for unpacking in main thread
+                'voltagemaps': [],
+                'qhisequences': [],
+                'thisequences': [],
+                'scalarfeatures': [],
+                'soh_labels': [],
+                'vehicle_ids': [],
+                'timestamps_start': [],
+                'timestamps_end': []
             }
         
-        # Get number of new samples
-        n_new = len(features['soh_labels'])
-        
-        # Append to HDF5 datasets
-        for key in ['voltagemaps', 'qhisequences', 'thisequences', 'scalarfeatures', 'soh_labels']:
-            hdf5_file[key].resize(hdf5_file[key].shape[0] + n_new, axis=0)
-            hdf5_file[key][-n_new:] = features[key]
-        
-        # Append metadata
-        for key in ['vehicle_ids', 'timestamps_start', 'timestamps_end']:
-            ds = hdf5_file[key]
-            ds.resize(ds.shape[0] + n_new, axis=0)
-            ds[-n_new:] = features[key]
-        
-        hdf5_file.flush()
-        
+        # Return full result with all required keys
         return {
             'vehicle_id': vehicle_id,
-            'samples_extracted': n_new,
-            'status': 'success'
+            'samples_extracted': len(features['soh_labels']),
+            'status': 'success',
+            'voltagemaps': features['voltagemaps'],
+            'qhisequences': features['qhisequences'],
+            'thisequences': features['thisequences'],
+            'scalarfeatures': features['scalarfeatures'],
+            'soh_labels': features['soh_labels'],
+            'vehicle_ids': features['vehicle_ids'],
+            'timestamps_start': features['timestamps_start'],
+            'timestamps_end': features['timestamps_end']
         }
         
     except Exception as e:
@@ -208,82 +207,99 @@ def process_vehicle(csv_path: Path, config: Dict[str, Any], hdf5_file: h5py.File
         return {
             'vehicle_id': vehicle_id,
             'samples_extracted': 0,
-            'status': f'error: {str(e)}'
+            'status': f'error: {str(e)}',
+            'voltagemaps': [],
+            'qhisequences': [],
+            'thisequences': [],
+            'scalarfeatures': [],
+            'soh_labels': [],
+            'vehicle_ids': [],
+            'timestamps_start': [],
+            'timestamps_end': []
         }
 
 def extraction_pipeline(config_path: str = "config.yaml"):
-    """... existing docstring ..."""
+    from concurrent.futures import ProcessPoolExecutor, as_completed
     from .utils import load_config
     
     config = load_config(config_path)
     print(f"Data profile: {config['orchestration']['data_profile']}\n")
-
     csv_paths = get_vehicle_paths(config['paths']['csv_dir'])
     print(f"Found {len(csv_paths)} vehicle files")
     
-    # Setup checkpoint first
+    # Setup checkpoint (main thread)
     checkpoint = load_checkpoint(config['paths']['checkpoint_path'])
     
-    # Setup HDF5 (with corruption detection)
+    # Setup HDF5 (main thread only)
     hdf5_file = setup_hdf5(config['paths']['hdf5path'], config)
     
-    vehicle_batch_size = config['processing'].get('vehicle_batch_size', 1)
-    
-    # Initialize counters for summary
+    batch_size = config['processing'].get('vehicle_batch_size', 4)
+    print(f"Batch Size: {batch_size}")
+
+    # Initialize stats
     stats = {
-        'processed': 0,
-        'success': 0,
-        'no_valid_segments': 0,
-        'errors': 0,
-        'failed_vehicles': []
+        'processed': 0, 'success': 0, 'no_valid_segments': 0,
+        'errors': 0, 'failed_vehicles': []
     }
     
     try:
-        # Determine starting point
+        # Resume from checkpoint
         if checkpoint['last_vehicle']:
             start_idx = next((i for i, p in enumerate(csv_paths) 
                             if p.name == checkpoint['last_vehicle']), -1) + 1
         else:
             start_idx = 0
         
-        # Process vehicles
-        for csv_path in tqdm(csv_paths[start_idx:], desc="Processing"):
-            try:
-                stats['processed'] += 1
-                result = process_vehicle(csv_path, config, hdf5_file)
+        # Process in batches
+        for i in tqdm(range(start_idx, len(csv_paths), batch_size), 
+                     desc="Processing batches"):
+            batch_paths = csv_paths[i:i + batch_size]
+            
+            # Process batch in parallel (workers don't touch HDF5)
+            with ProcessPoolExecutor(max_workers=batch_size) as executor:
+                futures = {
+                    executor.submit(process_vehicle, path, config, None): path 
+                    for path in batch_paths
+                }
                 
-                # Update checkpoint
-                checkpoint['last_vehicle'] = csv_path.name
-                checkpoint['total_samples'] += result['samples_extracted']
-                checkpoint['processed_vehicles'] += 1
-                
-                # Update stats
-                if result['status'] == 'success':
-                    stats['success'] += 1
-                elif result['status'] == 'no_valid_segments':
-                    stats['no_valid_segments'] += 1
-                else:
-                    stats['errors'] += 1
-                    stats['failed_vehicles'].append(csv_path.name)
-                    checkpoint['failed_vehicles'].append(csv_path.name)
-                
-                # Periodic checkpoint save
-                if checkpoint['processed_vehicles'] % vehicle_batch_size == 0:
-                    save_checkpoint(config['paths']['checkpoint_path'], checkpoint)
-                
-            except Exception as e:
-                print(f"❌ Error in {csv_path.name}: {e}")
-                stats['errors'] += 1
-                stats['failed_vehicles'].append(csv_path.name)
-                checkpoint['failed_vehicles'].append(csv_path.name)
-                
-                if config['processing'].get('fail_on_error', False):
-                    raise
+                for future in as_completed(futures):
+                    result = future.result()
+                    stats['processed'] += 1
+                    
+                    # Write to HDF5 (main thread only)
+                    if result['samples_extracted'] > 0:
+                        # Write to HDF5 (main thread only)
+                        n_new = result['samples_extracted']
+                        # Append all modalities
+                        for key in ['voltagemaps', 'qhisequences', 'thisequences', 
+                                'scalarfeatures', 'soh_labels']:
+                            hdf5_file[key].resize(hdf5_file[key].shape[0] + n_new, axis=0)
+                            hdf5_file[key][-n_new:] = result[key]
+                        
+                        # Append metadata
+                        for key in ['vehicle_ids', 'timestamps_start', 'timestamps_end']:
+                            ds = hdf5_file[key]
+                            ds.resize(ds.shape[0] + n_new, axis=0)
+                            ds[-n_new:] = result[key]
+                        
+                        hdf5_file.flush()
+                        stats['success'] += 1
+                        
+                    elif result['status'] == 'no_valid_segments':
+                        stats['no_valid_segments'] += 1
+                    else:
+                        stats['errors'] += 1
+                        stats['failed_vehicles'].append(result['vehicle_id'])
+                    
+                    # Update checkpoint
+                    checkpoint['last_vehicle'] = result['vehicle_id']
+                    checkpoint['total_samples'] += result['samples_extracted']
+                    checkpoint['processed_vehicles'] += 1
+            
+            # Save checkpoint after each batch
+            save_checkpoint(config['paths']['checkpoint_path'], checkpoint)
         
-        # Final save
-        save_checkpoint(config['paths']['checkpoint_path'], checkpoint)
-        
-        # Print summary instead of per-vehicle messages
+        # Final summary
         print(f"\n{'='*50}")
         print(f"✅ Processing Complete")
         print(f"{'='*50}")
@@ -297,7 +313,6 @@ def extraction_pipeline(config_path: str = "config.yaml"):
         print(f"{'='*50}")
         
     finally:
-        # CRITICAL: Always close HDF5 file, even on crash
         hdf5_file.close()
         print("HDF5 file closed safely")
 

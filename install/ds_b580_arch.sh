@@ -31,7 +31,7 @@ if ! command -v pyenv >/dev/null 2>&1; then
 fi
 
 # Install Python 3.11.x if not already installed
-PY311_VERSION="${PY311_VERSION:-3.11}"
+PY311_VERSION="${PY311_VERSION:-3.11.14}"
 if ! pyenv versions --bare | grep -q "^${PY311_VERSION}\$"; then
   echo -e "\nInstalling Python ${PY311_VERSION} via pyenv (this may take a while)..."
   pyenv install "${PY311_VERSION}"
@@ -55,7 +55,8 @@ fi
 echo -e "\nActivating VE & PIP install"
 source "${ENV_NAME}/bin/activate"
 # Core PyTorch + vision/audio
-pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/xpu
+pip install "torch==2.7.0" "torchvision==0.22.0" "torchaudio==2.7.0" --index-url https://download.pytorch.org/whl/xpu
+pip install "intel-extension-for-pytorch==2.7.0" -f https://software.intel.com/ipex-whl-stable
 # Data / ML stack
 pip install pandas==2.3.3 numpy==1.26.4 scipy==1.16.3 scikit-learn==1.7.2 tqdm==4.67.1 pyyaml==6.0.3 h5py==3.15.1
 # Visualization

@@ -1,7 +1,7 @@
 # --- Orchestration ---
 orchestration:
-  data_profile: "data_modified" # Options: data_paper | data_modified
-  model_profile: "model_modified" # Options: model_paper | model_modified
+  data_profile: "data_paper" # Options: data_paper / data_modified / data_suggest
+  model_profile: "model_paper" # Options: model_paper / model_modified / model_suggest
   profiles_dir: "config_profiles"
 
 # --- Dataset Configuration ---

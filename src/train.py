@@ -335,6 +335,7 @@ def model_pipeline(
     # 1. Load configuration
     config = load_config(config_path)
     print(f"Data profile: {config['orchestration']['model_profile']}")
+    print(f"Data profile: {config['orchestration']['data_profile']}")
 
     # 2. Create data loaders
     train_loader, val_loader, test_loader = create_dataloaders(config_path)
@@ -367,5 +368,16 @@ def model_pipeline(
         device,
         return_attention=return_attention,
     )
+
+    final_model_path = Path(config['paths']['checkpoint_dir']) / Path(config['orchestration']['model_profile'])
+    
+    torch.save({
+        'model_state_dict': trained_model.state_dict(),
+        'config': config,
+        'test_metrics': test_results,
+        'architecture': config['model'].get('architecture', 'resnet')
+    }, final_model_path)
+    
+    print(f"\n✓ Final model saved to: {final_model_path}")
 
     return trained_model, test_results

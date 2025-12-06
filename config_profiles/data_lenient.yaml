@@ -1,0 +1,9 @@
+# --- Dataset Processing ---
+processing:
+  vehicle_batch_size: 6 # MacOS = 8, B580 = 16
+  min_rest_hours: 0.5
+  min_charging_records: 80
+  max_gap_seconds: 120
+  voltage_increasing_threshold: 0.9
+  current_bounds: [0, 200]
+  fail_on_error: false
