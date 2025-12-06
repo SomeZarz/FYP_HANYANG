@@ -1,0 +1,15 @@
+# --- Model Sequence ---
+model:
+  name: "FusionModel"
+  embed_dim: 128
+  sequence_processor: "resnet"
+
+training:
+  batch_size: 32
+  learning_rate: 1.0e-3
+  weight_decay: 1.0e-5
+  num_epochs: 100
+  patience: 10
+  optimizer: "adam"
+  lr_schedule: "exp_decay"
+  n_repeats: 10

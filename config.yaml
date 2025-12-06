@@ -1,0 +1,30 @@
+# --- Orchestration ---
+orchestration:
+  data_profile: "data_modified" # Options: data_paper | data_modified
+  model_profile: "model_modified" # Options: model_paper | model_modified
+  profiles_dir: "config_profiles"
+
+# --- Dataset Configuration ---
+paths:
+  # Data Inputs
+  dataset_dir: "data"
+  dataset_name: "sample" # Options: sample_mini, sample, paper
+  csv_pattern: "*.csv"
+  # Data Outputs
+  extracted_data_dir: "data_extracted"
+  hdf5_filename: "{dataset_name}.h5"
+  hdf5path: "{extracted_data_dir}/{data_profile}_{dataset_name}.h5"
+  data_checkpoint_filename: "{extracted_data_dir}/{data_profile}_{dataset_name}_checkpoint.json"
+  # Model Checkpoints
+  checkpoint_dir: "checkpoints/{model_profile}"
+
+# --- Static Dataset Metadata ---
+dataset:
+  rated_capacity_ah: 155.0
+  num_cells: 96
+  voltage_window_mv: [3900, 4050]
+
+# --- Placeholder (profile override) ---
+processing: {}
+model: {}
+training: {}

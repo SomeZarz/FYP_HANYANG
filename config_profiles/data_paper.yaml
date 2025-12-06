@@ -1,0 +1,8 @@
+# --- Dataset Processing ---
+processing:
+  min_rest_hours: 1.0
+  min_charging_records: 100
+  max_gap_seconds: 60
+  voltage_increasing_threshold: 0.95
+  current_bounds: [0, 180]
+  fail_on_error: true
