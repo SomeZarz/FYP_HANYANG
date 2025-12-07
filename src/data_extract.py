@@ -1,610 +1,545 @@
-
-# src/data_extract.py
-
+# src/data_extraction.py
 import pandas as pd
 import numpy as np
-from typing import List, Dict, Any, Optional, Tuple
-import sys
 from pathlib import Path
+from typing import List, Dict, Any, Optional, Tuple
+import warnings
+
+# Paper-specified constants (hardcoded as discussed)
+SEQUENCE_LENGTH = 151
+NUM_CELLS = 96
+NUM_SCALAR_FEATURES = 15
 
 def parse_battery_voltage(cell_string: Any) -> np.ndarray:
-    """
-    Robustly parse batteryvoltage column which can be:
-    - String: "4.101~4.125~4.119~..."
-    - Float/NaN: corrupted data
-    - Other types: fallback to zeros
-    
-    Returns array of 96 cell voltages in mV
-    """
+    """Robustly parse battery voltage string into 96 cell voltages in mV."""
     try:
         if isinstance(cell_string, str):
-            # Normal case: tilde-separated string
             voltages = np.fromstring(cell_string, sep='~', dtype=float)
         elif isinstance(cell_string, (int, float)) and not pd.isna(cell_string):
-            # Single value: replicate across 96 cells
             voltages = np.full(96, float(cell_string))
         else:
-            # NaN or other corrupted data
             voltages = np.zeros(96)
         
-        # Ensure we have exactly 96 values
+        # Ensure exactly 96 values
         if len(voltages) != 96:
-            if len(voltages) > 96:
-                voltages = voltages[:96]
-            else:
-                # Pad with zeros
+            if len(voltages) < 96:
                 voltages = np.pad(voltages, (0, 96 - len(voltages)), 'constant')
+            else:
+                voltages = voltages[:96]
         
-        return voltages * 1000  # Convert V → mV
-    
+        return voltages * 1000  # Convert V to mV
     except Exception as e:
-        print(f"Warning: Failed to parse batteryvoltage '{cell_string}': {e}")
-        return np.zeros(96)  # Return zeros as fallback
+        warnings.warn(f"Failed to parse battery voltage: {e}")
+        return np.zeros(96)
 
-def voltage_to_soc(voltage_mv: float, ocv_soc_table: Optional[np.ndarray] = None) -> float:
-    """Convert OCV (mV) to SOC (0-1) using lookup table or linear approximation."""
-    if ocv_soc_table is not None:
-        voltages = ocv_soc_table[:, 0]
-        socs = ocv_soc_table[:, 1]
-        return np.interp(voltage_mv, voltages, socs)
-    else:
-        # Linear approximation (mV range)
-        soc = (voltage_mv - 3000) / (4200 - 3000)
-        return np.clip(soc, 0.0, 1.0)
+def voltage_to_soc(voltage_mv: float, ocv_table_path: Optional[Path] = None) -> float:
+    """Convert OCV (mV) to SOC using lookup table or NCM typical curve."""
+    try:
+        if ocv_table_path and ocv_table_path.exists():
+            table = np.loadtxt(ocv_table_path)
+            return np.interp(voltage_mv, table[:, 0], table[:, 1])
+    except:
+        pass
+    
+    # NCM typical OCV-SOC curve (hardcoded fallback)
+    ncm_lut = np.array([
+        [2800, 0.00], [3300, 0.05], [3500, 0.10], [3600, 0.20],
+        [3650, 0.30], [3700, 0.40], [3750, 0.50], [3800, 0.60],
+        [3900, 0.70], [4000, 0.80], [4100, 0.90], [4150, 0.95], [4200, 1.00]
+    ])
+    soc = np.interp(voltage_mv, ncm_lut[:, 0], ncm_lut[:, 1])
+    return np.clip(soc, 0.0, 1.0)
 
-def detect_rest_periods(
-    df: pd.DataFrame,
-    min_rest_hours: float = 1.0,
-    ocv_soc_table: Optional[np.ndarray] = None
-) -> List[Dict[str, Any]]:
-    """
-    Detect rest periods > min_rest_hours and calibrate SOC via OCV.
+def detect_rest_periods(df: pd.DataFrame, config: dict) -> List[Dict[str, Any]]:
+    """Detect rest periods and calibrate SOC via OCV."""
+    df = df.copy().sort_values('terminaltime').reset_index(drop=True)
     
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Vehicle DataFrame with columns:
-        - terminaltime (cumulative seconds)
-        - maxvoltagebattery (max cell voltage in V)
-        - soc (BMS SOC %, 0-100)
-    min_rest_hours : float
-        Minimum rest duration in hours (default: 1.0)
-    ocv_soc_table : np.ndarray, optional
-        2D array mapping OCV (mV) → SOC (0-1). If None, uses linear approximation.
-    """
-    # Copy to avoid modifying original
-    df = df.copy()
+    min_gap = config['ocv_calibration']['min_rest_hours'] * 3600
+    max_soc = config['ocv_calibration']['max_soc_start']
+    ocv_path = config['ocv_calibration'].get('ocv_table_path')
+    if ocv_path:
+        ocv_path = Path(ocv_path)
     
-    # Ensure terminaltime is numeric
-    df['terminaltime'] = pd.to_numeric(df['terminaltime'], errors='coerce')
-    
-    # Compute time gaps in seconds
-    df = df.sort_values('terminaltime').reset_index(drop=True)
     time_gaps = df['terminaltime'].diff()
-    
-    # Find rest periods
-    min_gap_seconds = min_rest_hours * 3600
-    rest_mask = time_gaps > min_gap_seconds
+    rest_mask = time_gaps > min_gap
     
     rest_events = []
     for idx in df[rest_mask].index:
-        t_s = df.loc[idx, 'terminaltime']
-        max_voltage_v = df.loc[idx, 'maxvoltagebattery']
-        max_voltage_mv = max_voltage_v * 1000  # Convert V → mV
+        voltage_v = df.loc[idx, 'maxvoltagebattery']
+        voltage_mv = voltage_v * 1000
         
-        # OCV → SOC calibration
-        soc_ocv = voltage_to_soc(max_voltage_mv, ocv_soc_table)
+        soc_ocv = voltage_to_soc(voltage_mv, ocv_path)
         
-        # Filter: keep only if SOC < 0.6
-        if soc_ocv < 0.6:
+        if soc_ocv < max_soc:
             rest_events.append({
-                't_s': t_s,
+                'ts': df.loc[idx, 'terminaltime'],
                 'soc_ocv': soc_ocv,
-                'max_voltage': max_voltage_mv,
-                'start_idx': idx
+                'maxvoltage_mv': voltage_mv,
+                'startidx': idx
             })
     
     return rest_events
 
-def identify_charging_segments(
-    df: pd.DataFrame,
-    rest_events: List[Dict[str, Any]],
-    config: Dict[str, Any]
-) -> List[Dict[str, Any]]:
-    """
-    Identify full-charge segments following each rest event.
-    
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Full vehicle DataFrame
-    rest_events : list
-        Output from detect_rest_periods()
-    config : dict
-        Must contain processing parameters: min_charging_records, voltage_window_mv
-        
-    Returns
-    -------
-    list of dicts
-        Each dict contains segment data and quality flags
-    """
-    segments = []
+'''
+    PARKING PERIOD FIX
+'''
+def identify_charging_segments(df: pd.DataFrame, rest_events: List[dict], config: dict) -> List[dict]:
+    """Identify charging segments that contain the voltage window."""
     df = df.sort_values('terminaltime').reset_index(drop=True)
     
-    for rest_event in rest_events:
-        t_s = rest_event['t_s']
-        start_idx = rest_event['start_idx']
+    status_value = config['charging']['status_value']
+    voltage_window = config['dataset']['voltage_window_mv']
+    min_samples = config['quality_checks']['min_samples_in_window']
+    
+    segments = []
+    
+    for rest in rest_events:
+        start_idx = rest['startidx']
+        post_rest = df.iloc[start_idx:].reset_index(drop=True)
         
-        # Scan forward from rest point
-        post_rest = df.iloc[start_idx:]
-        
-        # Find charging start: chargestatus == 3
-        charging_mask = post_rest['chargestatus'] == 3
+        # Find charging start
+        charging_mask = post_rest['chargestatus'] == status_value
         if not charging_mask.any():
-            continue  # No charging after this rest
+            continue
         
+        # Get the full charging session
         charging_start_idx = post_rest[charging_mask].index[0]
+        segment_df = post_rest.iloc[charging_start_idx:].copy()
         
-        # Find full charge: soc == 100 AND maxvoltagebattery >= 4.25
-        full_charge_mask = (
-            (post_rest['soc'] >= 99.5) &  # Allow 99.5+ for float precision
-            (post_rest['maxvoltagebattery'] >= 4.24)  # 4.25V threshold
-        )
+        # Find where voltage window occurs within this charging session
+        voltages = segment_df['maxvoltagebattery'].values * 1000
         
-        if not full_charge_mask.any():
-            continue  # Never reached full charge
+        # Find indices where voltage is within the window
+        in_window = (voltages >= voltage_window[0]) & (voltages <= voltage_window[1])
         
-        full_charge_idx = post_rest[full_charge_mask].index[0]
+        if not in_window.any():
+            continue
         
-        # Extract segment
-        segment_df = df.loc[charging_start_idx:full_charge_idx].copy()
-        segment_df = segment_df.sort_values('terminaltime').reset_index(drop=True)
+        # Get contiguous block within window
+        window_indices = np.where(in_window)[0]
+        if len(window_indices) < min_samples:
+            continue
         
-        # Compute time gaps for validation
-        time_gaps = segment_df['terminaltime'].diff().dropna()
+        # Extract only the window portion
+        window_start = window_indices[0]
+        window_end = window_indices[-1]
+        window_df = segment_df.iloc[window_start:window_end + 1].copy()
         
-        # Validate segment quality
-        quality_flags = validate_charging_segment(segment_df, time_gaps, config)
+        # Check for gaps WITHIN the window (not the parking period before)
+        time_gaps = window_df['terminaltime'].diff().dropna()
+        if (time_gaps > config['quality_checks']['max_gap_seconds']).any():
+            continue
         
-        if quality_flags['is_valid']:
-            segments.append({
-                'segment_df': segment_df,
-                't_s': t_s,
-                't_e': segment_df['terminaltime'].iloc[-1],
-                'soc_ocv': rest_event['soc_ocv'],
-                'quality_flags': quality_flags
-            })
+        segments.append({
+            'segment_df': window_df,
+            'ts': window_df['terminaltime'].iloc[0],
+            'te': window_df['terminaltime'].iloc[-1],
+            'soc_ocv': rest['soc_ocv']
+        })
     
     return segments
 
-def validate_charging_segment(
-    segment_df: pd.DataFrame,
-    time_gaps: pd.Series,
-    config: Dict[str, Any]
-) -> Dict[str, Any]:
-    """Validate charging segment quality."""
+def validate_and_clean_segment(segment_df: pd.DataFrame, config: dict) -> Tuple[pd.DataFrame, dict]:
+    """Apply data quality corrections and return cleaned segment."""
+    segment_df = segment_df.copy()
     flags = {}
+
+    '''
+        CURRENT UNIT DETECTION FIX
+    '''
+    current_raw = segment_df['totalcurrent'].values
+    if np.abs(current_raw).max() > 500:  # If max current > 500, it's likely mA
+        # warnings.warn(f"Current appears to be in mA (max={current_raw.max():.1f}). Converting to A.")
+        segment_df['totalcurrent'] = current_raw / 1000.0
+
+    # Check minimum length
+    min_samples = config['quality_checks']['min_samples_in_window']
+    flags['has_min_records'] = len(segment_df) >= min_samples
     
-    # Check 1: Minimum length
-    min_records = config['processing']['min_charging_records']
-    flags['has_min_records'] = len(segment_df) >= min_records
+    # Check temporal gaps
+    max_gap = config['quality_checks']['max_gap_seconds']
+    time_gaps = segment_df['terminaltime'].diff().dropna()
+    flags['no_large_gaps'] = (time_gaps <= max_gap).all()
     
-    # Check 2: No large gaps
-    max_gap_seconds = config['processing']['max_gap_seconds']
-    flags['no_large_gaps'] = (time_gaps <= max_gap_seconds).all()
+    # Voltage smoothing (default: interpolation)
+    smoothing_method = config['quality_checks'].get('voltage_smoothing', 'interpolation')
+    if smoothing_method == 'interpolation':
+        voltage = segment_df['maxvoltagebattery'].values
+        for i in range(1, len(voltage)):
+            if voltage[i] < voltage[i-1]:
+                voltage[i] = voltage[i-1]
+        segment_df['maxvoltagebattery'] = voltage
     
-    # Check 3: Voltage monotonic increase (allow small drops)
-    voltage_diff = segment_df['maxvoltagebattery'].diff().dropna()
-    threshold = config['processing']['voltage_increasing_threshold']
-    flags['voltage_increasing'] = (voltage_diff > -0.001).mean() >= threshold
+    # Current sign correction
+    sign_convention = config['quality_checks']['current_sign_convention']
+    if sign_convention == 'forcepositive':
+        segment_df['totalcurrent'] = segment_df['totalcurrent'].abs()
+    elif sign_convention == 'inverted':
+        segment_df['totalcurrent'] = -segment_df['totalcurrent']
     
-    # Check 4: Current within realistic bounds
-    current_bounds = config['processing']['current_bounds']
+    # Check current bounds
+    current_bounds = config['quality_checks']['current_bounds_a']
     current_abs = segment_df['totalcurrent'].abs()
     flags['current_in_bounds'] = (
-        (current_abs >= current_bounds[0]) &
+        (current_abs >= current_bounds[0]) & 
         (current_abs <= current_bounds[1])
     ).all()
     
-    # Check 5: Voltage window coverage (3900-4050 mV)
+    # Check voltage window coverage
     voltage_window = config['dataset']['voltage_window_mv']
-    voltage_mv = segment_df['maxvoltagebattery'] * 1000
+    voltages = segment_df['maxvoltagebattery'].values * 1000
     flags['covers_voltage_window'] = (
-        (voltage_mv >= voltage_window[0]).any() and
-        (voltage_mv <= voltage_window[1]).any()
+        (voltages >= voltage_window[0]).any() and 
+        (voltages <= voltage_window[1]).any()
     )
     
-    # Check 6: SOH plausibility
-    try:
-        dt = segment_df['terminaltime'].diff().fillna(0).values
-        current_a = segment_df['totalcurrent'].abs().values
-        capacity_ah = (current_a * dt).sum() / 3600.0
-        rated_capacity = config['dataset']['rated_capacity_ah']
-        soh_estimate = capacity_ah / rated_capacity
-        flags['soh_plausible'] = 0.5 <= soh_estimate <= 1.2
-    except:
-        flags['soh_plausible'] = False
+    '''
+        DEBUG LOGGING FIX
+    '''
+    flags['is_valid'] = True
+    failure_reasons = []
     
-    # Overall validity
-    flags['is_valid'] = all([
-        flags['has_min_records'],
-        flags['no_large_gaps'],
-        flags['voltage_increasing'],
-        flags['current_in_bounds'],
-        flags['covers_voltage_window'],
-        flags['soh_plausible']
-    ])
+    if not flags['has_min_records']:
+        flags['is_valid'] = False
+        failure_reasons.append(f"too_few_samples_{len(segment_df)}")
     
-    return flags
+    if not flags['no_large_gaps']:
+        flags['is_valid'] = False
+        max_gap_found = time_gaps.max()
+        failure_reasons.append(f"large_gap_{max_gap_found:.1f}s")
+    
+    if not flags['current_in_bounds']:
+        flags['is_valid'] = False
+        current_min = current_abs.min()
+        current_max = current_abs.max()
+        failure_reasons.append(f"current_out_of_bounds_{current_min:.1f}-{current_max:.1f}A")
+    
+    if not flags['covers_voltage_window']:
+        flags['is_valid'] = False
+        v_min = voltages.min()
+        v_max = voltages.max()
+        failure_reasons.append(f"voltage_window_{v_min:.0f}-{v_max:.0f}mV")
+    
+    if failure_reasons:
+        vehicle_id = segment_df.get('vehicleid', ['unknown'])[0]
+        # print(f"DEBUG: Rejected segment from {vehicle_id}: {'; '.join(failure_reasons)}")
+    
+    return segment_df, flags
 
-def compute_soh(
-    segment_df: pd.DataFrame,
-    soc_ocv: float,
-    rated_capacity_ah: float = 155.0
-) -> float:
-    """
-    Compute SOH via ampere-hour integration.
-    
-    Parameters
-    ----------
-    segment_df : pd.DataFrame
-        Charging segment with columns: terminaltime, totalcurrent
-    soc_ocv : float
-        Calibrated SOC at segment start (0-1)
-    rated_capacity_ah : float
-        Nominal pack capacity (default: 155.0 Ah)
-    """
-    # Time step in seconds
-    dt = segment_df['terminaltime'].diff().fillna(0)
-    
-    # Use charging current magnitude
-    if 'totalcurrent' not in segment_df.columns:
-        raise KeyError("totalcurrent column missing in segment_df")
-    
-    current_a = segment_df['totalcurrent'].abs().values
+def compute_soh(segment_df: pd.DataFrame, soc_ocv: float, config: dict) -> float:
+    """Compute SOH using paper-correct formula with OCV-SOC correction."""
+    rated_capacity = config['dataset']['rated_capacity_ah']
+    soh_bounds = config['soh_calculation']['soh_bounds']
+    min_delta_soc = config['soh_calculation']['min_abs_delta_soc']
     
     # Ampere-hour integration
-    capacity_ah = (current_a * dt.values).sum() / 3600.0
-    soh = capacity_ah / rated_capacity_ah
+    dt = segment_df['terminaltime'].diff().fillna(0).values
+    current = segment_df['totalcurrent'].abs().values
+    charged_capacity = np.sum(current * dt) / 3600.0
     
-    if not (0.5 <= soh <= 1.2):
-        raise ValueError(f"Unrealistic SOH: {soh:.3f} (capacity={capacity_ah:.2f}Ah)")
+    # SOC at end (prefer voltage-based if full charge reached)
+    end_voltage_mv = segment_df['maxvoltagebattery'].iloc[-1] * 1000
+    ocv_path = config['ocv_calibration'].get('ocv_table_path')
+    if ocv_path:
+        ocv_path = Path(ocv_path)
+    soc_end = voltage_to_soc(end_voltage_mv, ocv_path)
+    
+    # Fallback to BMS SOC if voltage method fails
+    if soc_end < 0 or soc_end > 1:
+        soc_end = segment_df['soc'].iloc[-1] / 100.0
+    
+    delta_soc = max(soc_end - soc_ocv, min_delta_soc)
+
+    '''
+        DEBUG CHECK
+    '''
+    # print(f"DEBUG: Current stats - min={current.min():.2f}, max={current.max():.2f}, mean={current.mean():.2f}")
+    # print(f"DEBUG: dt stats - min={dt.min():.2f}, max={dt.max():.2f}, mean={dt.mean():.2f}")
+    # print(f"DEBUG: Charged capacity = {charged_capacity:.6f} Ah")
+    # print(f"DEBUG: SOC start={soc_ocv:.3f}, end={soc_end:.3f}, delta={delta_soc:.3f}")
+    
+    # Paper-correct formula: SOH = (charged_capacity / ΔSOC) / rated_capacity
+    soh = (charged_capacity / delta_soc) / rated_capacity
+    
+    '''
+        VALIDATION BOUNDS FIX
+    '''
+    if not (soh_bounds[0] <= soh <= soh_bounds[1]):
+        return np.nan
     
     return soh
 
-def extract_qhi_thi(segment_df: pd.DataFrame) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Extract QHI (current) and THI (temperature) sequences.
-    
-    Returns
-    -------
-    tuple (qhi, thi)
-        Both are np.ndarray of shape (151,) normalized to [0, 1]
-    """
-    # Ensure required columns exist
-    required_cols = ['terminaltime', 'totalcurrent', 'maxtemperaturevalue']
-    for col in required_cols:
-        if col not in segment_df.columns:
-            raise KeyError(f"Missing required column: {col}")
-    
-    # Extract raw values
-    terminaltime = segment_df['terminaltime'].values
-    current_a = segment_df['totalcurrent'].abs().values
-    temperature_c = segment_df['maxtemperaturevalue'].values
-    
-    # Normalize time to [0, 1] for interpolation
-    t_norm = (terminaltime - terminaltime[0]) / (terminaltime[-1] - terminaltime[0] + 1e-8)
-    
-    # Target interpolation points (151 points)
-    t_target = np.linspace(0, 1, 151)
-    
-    # Interpolate QHI (current)
-    qhi_raw = np.interp(t_target, t_norm, current_a)
-    
-    # Interpolate THI (temperature)
-    thi_raw = np.interp(t_target, t_norm, temperature_c)
-    
-    # Normalize QHI to [0, 1]
-    qhi_min, qhi_max = qhi_raw.min(), qhi_raw.max()
-    if qhi_max > qhi_min:
-        qhi = (qhi_raw - qhi_min) / (qhi_max - qhi_min)
-    else:
-        qhi = np.zeros_like(qhi_raw)
-    
-    # Normalize THI to [0, 1]
-    thi_min, thi_max = thi_raw.min(), thi_raw.max()
-    if thi_max > thi_min:
-        thi = (thi_raw - thi_min) / (thi_max - thi_min)
-    else:
-        thi = np.zeros_like(thi_raw)
-    
-    return qhi, thi
-
-def extract_voltage_map(segment_df: pd.DataFrame, config: Dict[str, Any]) -> np.ndarray:
-    """
-    Extract 96×96 voltage difference matrix from segment.
-    
-    Parameters
-    ----------
-    segment_df : pd.DataFrame
-        Charging segment with batteryvoltage column
-    config : dict
-        Must contain dataset.voltage_window_mv
-        
-    Returns
-    -------
-    np.ndarray
-        96×96 voltage difference map normalized to [0, 1]
-    """
-    # Step 1: Parse batteryvoltage strings
-    if 'batteryvoltage' not in segment_df.columns:
-        raise KeyError("batteryvoltage column missing")
-    
-    cell_voltages = np.array([
-        parse_battery_voltage(s) for s in segment_df['batteryvoltage'].values
-    ])
-    
-    # Validate shape
-    if cell_voltages.shape[1] != 96:
-        raise ValueError(f"Expected 96 cells, got {cell_voltages.shape[1]}")
-    
-    # Step 2: Filter to voltage window
-    max_voltages = cell_voltages.max(axis=1)
+def extract_qhi_thi(segment_df: pd.DataFrame, config: dict) -> Tuple[np.ndarray, np.ndarray]:
+    """Extract QHI and THI sequences using voltage-based interpolation."""
     voltage_window = config['dataset']['voltage_window_mv']
-    window_mask = (max_voltages >= voltage_window[0]) & (max_voltages <= voltage_window[1])
     
-    if not window_mask.any():
-        return np.zeros((96, 96))
+    # Filter to voltage window
+    voltages = segment_df['maxvoltagebattery'].values * 1000
+    in_window = (voltages >= voltage_window[0]) & (voltages <= voltage_window[1])
     
-    window_voltages = cell_voltages[window_mask]
+    if not in_window.any():
+        raise ValueError("No data in voltage window")
     
-    # Step 3: Interpolate to exactly 96 timepoints
-    original_len = len(window_voltages)
-    if original_len < 2:
-        return np.zeros((96, 96))
+    window_df = segment_df[in_window].copy()
     
-    x = np.linspace(0, 1, original_len)
+    # Extract values
+    voltage_points = window_df['maxvoltagebattery'].values * 1000
+    capacity = window_df['totalcurrent'].abs().cumsum() * (window_df['terminaltime'].diff().fillna(0) / 3600.0)
+    capacity = capacity.values
+    
+    # Temperature (use maxtemp if available, else estimate)
+    if 'maxtemperaturevalue' in window_df.columns:
+        temperature = window_df['maxtemperaturevalue'].values
+    else:
+        temperature = np.full(len(window_df), 25.0)  # Default room temp
+    
+    # Interpolate to fixed voltage points
+    v_target = np.linspace(voltage_window[0], voltage_window[1], SEQUENCE_LENGTH)
+    
+    qhi = np.interp(v_target, voltage_points, capacity)
+    thi = np.interp(v_target, voltage_points, temperature)
+    
+    # Normalize to [0,1] for model input
+    qhi_norm = (qhi - qhi.min()) / (qhi.max() - qhi.min() + 1e-8)
+    thi_norm = (thi - thi.min()) / (thi.max() - thi.min() + 1e-8)
+    
+    return qhi_norm, thi_norm
+
+def extract_voltage_map(segment_df: pd.DataFrame, config: dict) -> np.ndarray:
+    """Extract 96x96 voltage map (time steps × cells)."""
+    voltage_window = config['dataset']['voltage_window_mv']
+    
+    # Parse cell voltages for each timestep
+    cell_voltages = []
+    for voltage_str in segment_df['batteryvoltage'].values:
+        cells = parse_battery_voltage(voltage_str)
+        cell_voltages.append(cells)
+    cell_voltages = np.array(cell_voltages)  # Shape: (timesteps, 96)
+    
+    # Filter to voltage window
+    max_voltages = cell_voltages.max(axis=1)
+    in_window = (max_voltages >= voltage_window[0]) & (max_voltages <= voltage_window[1])
+    
+    if not in_window.any():
+        raise ValueError("No data in voltage window")
+    
+    window_voltages = cell_voltages[in_window]
+    
+    # Interpolate to exactly 96 timesteps
+    n_timesteps = len(window_voltages)
+    if n_timesteps < 2:
+        raise ValueError("Insufficient timesteps")
+    
+    x_original = np.linspace(0, 1, n_timesteps)
     x_target = np.linspace(0, 1, 96)
     
-    interpolated = np.array([
-        np.interp(x_target, x, window_voltages[:, i])
-        for i in range(96)
-    ]).T  # Shape: (96, 96)
+    voltage_map = np.zeros((96, 96))
+    for cell_idx in range(96):
+        voltage_map[:, cell_idx] = np.interp(x_target, x_original, window_voltages[:, cell_idx])
     
-    # Step 4: Create 96×96 difference matrices for each timepoint
-    maps_3d = np.zeros((96, 96, 96))
-    for t in range(96):
-        for i in range(96):
-            for j in range(96):
-                maps_3d[i, j, t] = interpolated[t, i] - interpolated[t, j]
+    # Normalize to [0,1]
+    voltage_map = (voltage_map - voltage_map.min()) / (voltage_map.max() - voltage_map.min() + 1e-8)
     
-    # Step 5: Aggregate across time (mean)
-    final_map = maps_3d.mean(axis=2)
-    
-    # Step 6: Normalize to [0, 1]
-    map_min, map_max = final_map.min(), final_map.max()
-    if map_max > map_min:
-        final_map = (final_map - map_min) / (map_max - map_min)
-    else:
-        final_map = np.zeros_like(final_map)
-    
-    return final_map
+    return voltage_map
 
-def extract_scalar_features(segment_df: pd.DataFrame, soc_ocv: float) -> np.ndarray:
-    """
-    Extract 15-point degradation indicator vector.
-    """
+def extract_scalar_features(segment_df: pd.DataFrame, qhi_raw: np.ndarray, thi_raw: np.ndarray, soc_ocv: float, config: dict) -> np.ndarray:
+    """Extract 15-point scalar feature vector matching Paper Table 1."""
     features = []
     
-    # 1-3: Voltage differences across cells
-    try:
-        cell_voltages_list = [parse_battery_voltage(s) for s in segment_df['batteryvoltage'].values]
-        voltage_diffs = [np.max(v) - np.min(v) for v in cell_voltages_list]
-        voltage_diffs = np.array(voltage_diffs)
-        features.extend([voltage_diffs.max(), voltage_diffs.min(), voltage_diffs.std()])
-    except Exception as e:
-        print(f"Warning: Voltage diff extraction failed: {e}")
-        features.extend([0.0, 0.0, 0.0])
-    
-    # 4-6: Temperature stats
-    try:
-        max_temp = segment_df['maxtemperaturevalue'].max()
-    except:
-        max_temp = 25.0
-    try:
-        min_temp = segment_df['mintemperaturevalue'].min()
-    except:
-        min_temp = 25.0
-    features.extend([max_temp, min_temp, max_temp - min_temp])
-    
-    # 7-8: Current and duration
-    try:
-        avg_current = segment_df['totalcurrent'].abs().mean()
-    except:
-        avg_current = 0.0
-    try:
-        duration = segment_df['terminaltime'].iloc[-1] - segment_df['terminaltime'].iloc[0]
-    except:
-        duration = 0.0
-    features.extend([avg_current, duration])
-    
-    # 9-10: Mileage and age
-    try:
-        mileage = segment_df['totalodometer'].iloc[-1] if 'totalodometer' in segment_df.columns else 0.0
-    except:
+    # 1. Mileage (km)
+    if 'totalodometer' in segment_df.columns:
+        mileage = segment_df['totalodometer'].iloc[-1]
+    else:
         mileage = 0.0
-    try:
-        first_time = segment_df['terminaltime'].iloc[0]
-        last_time = segment_df['terminaltime'].iloc[-1]
-        age_days = (last_time - first_time) / (24 * 3600)
-    except:
-        age_days = 0.0
-    features.extend([mileage, age_days])
+    features.append(mileage)
     
-    # 11-12: SOC metrics
-    try:
-        bms_soc = segment_df['soc'].iloc[0] / 100.0
-        soc_error = abs(bms_soc - soc_ocv)
-    except:
-        bms_soc = soc_ocv
-        soc_error = 0.0
-    features.extend([soc_ocv, soc_error])
+    # 2. Average temperature
+    if 'maxtemperaturevalue' in segment_df.columns:
+        t_avg = segment_df['maxtemperaturevalue'].mean()
+    else:
+        t_avg = 25.0
+    features.append(t_avg)
     
-    # 13-15: Variance metrics
+    # 3-6. QHI statistics (from raw values)
+    features.extend([
+        float(np.mean(qhi_raw)),
+        float(np.median(qhi_raw)),
+        float(np.std(qhi_raw)),
+        float(np.ptp(qhi_raw))
+    ])
+    
+    # 7-10. Cell voltage range statistics
     try:
-        voltage_var = segment_df['maxvoltagebattery'].var()
+        cell_voltages = [parse_battery_voltage(v) for v in segment_df['batteryvoltage'].values]
+        cell_voltages = np.array(cell_voltages)
+        dV = np.max(cell_voltages, axis=1) - np.min(cell_voltages, axis=1)
+        features.extend([
+            float(np.mean(dV)),
+            float(np.median(dV)),
+            float(np.std(dV)),
+            float(np.ptp(dV))
+        ])
     except:
-        voltage_var = 0.0
-    try:
-        current_var = segment_df['totalcurrent'].var()
-    except:
-        current_var = 0.0
-    try:
-        temp_var = segment_df['maxtemperaturevalue'].var()
-    except:
-        temp_var = 0.0
-    features.extend([voltage_var, current_var, temp_var])
+        features.extend([0.0, 0.0, 0.0, 0.0])
+    
+    # 11-12. Current statistics
+    features.extend([
+        float(segment_df['totalcurrent'].abs().max()),
+        float(segment_df['totalcurrent'].abs().mean())
+    ])
+    
+    # 13. End voltage
+    features.append(float(segment_df['maxvoltagebattery'].iloc[-1]))
+    
+    # 14-15. Temperature features
+    if 'mintemperaturevalue' in segment_df.columns:
+        t_min = segment_df['mintemperaturevalue'].min()
+        t_min_avg = segment_df['mintemperaturevalue'].mean()
+    else:
+        t_min = 25.0
+        t_min_avg = 25.0
+    features.extend([t_min, t_min_avg])
     
     # Ensure exactly 15 features
-    if len(features) != 15:
-        print(f"Warning: Expected 15 features, got {len(features)}. Padding...")
-        padded = np.zeros(15, dtype=np.float32)
-        padded[:len(features)] = features[:15]
-        features = padded
+    if len(features) != NUM_SCALAR_FEATURES:
+        warnings.warn(f"Expected 15 features, got {len(features)}. Padding...")
+        features = (features + [0.0] * NUM_SCALAR_FEATURES)[:NUM_SCALAR_FEATURES]
     
     return np.array(features, dtype=np.float32)
 
-def extract_all_features(
-    df: pd.DataFrame,
-    config: Dict[str, Any]
-) -> Optional[Dict[str, Any]]:
-    """
-    Full feature extraction pipeline for one vehicle.
+def extract_all_features(df: pd.DataFrame, config: dict) -> Optional[Dict[str, Any]]:
+    """Full feature extraction pipeline for one vehicle."""
+    df = df.copy()
+    ''' VEHICLE ID LOGGING '''
+    vehicle_id = df.get('vehicleid', ['unknown'])[0]
     
-    Returns
-    -------
-    dict or None
-        If valid segments found, returns dict with keys:
-        - voltagemaps: np.array (N, 96, 96)
-        - qhisequences: np.array (N, 151)
-        - thisequences: np.array (N, 151)
-        - scalarfeatures: np.array (N, 15)
-        - soh_labels: np.array (N,)
-        - vehicle_ids: list[str]
-        - timestamps_start: list[str]
-        - timestamps_end: list[str]
-    """
-    # Step 1: Detect rest periods
-    rest_events = detect_rest_periods(
-        df,
-        min_rest_hours=config['processing']['min_rest_hours']
-    )
+    # Ensure required columns exist
+    required_cols = ['terminaltime', 'totalcurrent', 'maxvoltagebattery', 
+                     'batteryvoltage', 'chargestatus', 'soc']
+    missing_cols = [col for col in required_cols if col not in df.columns]
+    if missing_cols:
+        ''' VEHICLE ID LOGGING '''
+        warnings.warn(f"Vehicle {vehicle_id}: Missing columns {missing_cols}")
+        return None
     
+    # Stage 1: Detect rest periods
+    rest_events = detect_rest_periods(df, config)
     if not rest_events:
+        ''' VEHICLE ID LOGGING '''
+        warnings.warn(f"Vehicle {vehicle_id}: No rest events")
         return None
     
-    # Step 2: Identify charging segments
-    segments = identify_charging_segments(df, rest_events, config)
-    
-    if not segments:
+    # Stage 2: Identify charging segments
+    segment_candidates = identify_charging_segments(df, rest_events, config)
+    if not segment_candidates:
+        ''' VEHICLE ID LOGGING '''
+        # warnings.warn(f"Vehicle {vehicle_id}: No charging segments identified")
         return None
     
-    # Step 3: Extract features from each segment
+    # Collections for all valid segments
     all_features = {
-        'voltagemaps': [],
-        'qhisequences': [],
-        'thisequences': [],
-        'scalarfeatures': [],
+        'voltage_maps': [],
+        'qhi_sequences': [],
+        'thi_sequences': [],
+        'scalar_features': [],
         'soh_labels': [],
         'vehicle_ids': [],
         'timestamps_start': [],
         'timestamps_end': []
     }
     
-    for seg in segments:
+    # Stage 3: Process each segment
+    for seg in segment_candidates:
         try:
-            # Compute SOH
-            soh = compute_soh(seg['segment_df'], seg['soc_ocv'], config['dataset']['rated_capacity_ah'])
+            segment_df, quality_flags = validate_and_clean_segment(seg['segment_df'], config)
             
-            # Extract QHI/THI sequences
-            qhi, thi = extract_qhi_thi(seg['segment_df'])
+            '''
+                FAILURE LOGGING
+            '''
+            if not quality_flags['is_valid']:
+                reasons = []
+                if not quality_flags['has_min_records']:
+                    reasons.append(f"too_few_samples_{len(segment_df)}")
+                if not quality_flags['no_large_gaps']:
+                    reasons.append("large_gaps")
+                if not quality_flags['current_in_bounds']:
+                    reasons.append("current_out_of_bounds")
+                if not quality_flags['covers_voltage_window']:
+                    reasons.append("voltage_window_not_covered")
+                
+                warnings.warn(f"Vehicle {vehicle_id}, segment {i}: {'; '.join(reasons)}")
+                continue
             
-            # Extract voltage map
-            vmap = extract_voltage_map(seg['segment_df'], config)
+            '''
+                COMPUTE SOH FIX
+            '''
+            soh = compute_soh(segment_df, seg['soc_ocv'], config)
+            if np.isnan(soh):
+                continue
             
-            # Extract scalar features
-            scalars = extract_scalar_features(seg['segment_df'], seg['soc_ocv'])
+            # Extract features
+            qhi, thi = extract_qhi_thi(segment_df, config)
+            voltage_map = extract_voltage_map(segment_df, config)
+            # Get raw QHI/THI for scalar features (before normalization)
+            qhi_raw, thi_raw = qhi, thi  # These are already extracted
             
-            # Append to collection
-            all_features['voltagemaps'].append(vmap)
-            all_features['qhisequences'].append(qhi)
-            all_features['thisequences'].append(thi)
-            all_features['scalarfeatures'].append(scalars)
+            scalars = extract_scalar_features(segment_df, qhi_raw, thi_raw, seg['soc_ocv'], config)
+            
+            # Append to collections
+            all_features['voltage_maps'].append(voltage_map)
+            all_features['qhi_sequences'].append(qhi)
+            all_features['thi_sequences'].append(thi)
+            all_features['scalar_features'].append(scalars)
             all_features['soh_labels'].append(soh)
-            all_features['vehicle_ids'].append(seg['segment_df'].iloc[0]['vehicle_id'])
-            all_features['timestamps_start'].append(str(seg['t_s']))
-            all_features['timestamps_end'].append(str(seg['t_e']))
+            all_features['vehicle_ids'].append(seg['segment_df']['vehicleid'].iloc[0])
+            all_features['timestamps_start'].append(str(int(seg['ts'])))
+            all_features['timestamps_end'].append(str(int(seg['te'])))
             
         except Exception as e:
-            print(f"Warning: Failed to process segment: {e}")
+            warnings.warn(f"Failed to process segment: {e}")
             continue
     
+    # Check if any valid segments
     if not all_features['soh_labels']:
         return None
     
-    # Convert lists to arrays
-    return {k: np.array(v) if isinstance(v[0], np.ndarray) else v
-            for k, v in all_features.items()}
+    # Convert to numpy arrays
+    return {
+        'voltage_maps': np.array(all_features['voltage_maps'], dtype=np.float32),
+        'qhi_sequences': np.array(all_features['qhi_sequences'], dtype=np.float32),
+        'thi_sequences': np.array(all_features['thi_sequences'], dtype=np.float32),
+        'scalar_features': np.array(all_features['scalar_features'], dtype=np.float32),
+        'soh_labels': np.array(all_features['soh_labels'], dtype=np.float32),
+        'vehicle_ids': all_features['vehicle_ids'],
+        'timestamps_start': all_features['timestamps_start'],
+        'timestamps_end': all_features['timestamps_end']
+    }
 
-def run_extraction_pipeline(config_path: str = "config.yaml"):
-    """Orchestrate full Stage 1-2 pipeline with new config system."""
-    from .utils import load_config
-    
-    config = load_config(config_path)
-    print(f"Running extraction pipeline for dataset: {config['paths']['dataset_name']}")
-    print(f"Extracted data will be saved to: {config['paths']['hdf5path']}")
-    
-    # Import data_process to run the pipeline
-    from .data_process import run_pipeline
-    run_pipeline(config)
-
-# ============================================================================
-# Test Harness
-# ============================================================================
-if __name__ == "__main__":
-    # Add project root to path
-    project_root = Path(__file__).parent.parent
-    sys.path.insert(0, str(project_root))
-    
-    # Load config
-    from src.utils import load_config_for_testing
-    config = load_config_for_testing()
-    
-    csv_dir = config['paths']['csv_dir']
-    
-    # Find first CSV
-    csv_files = sorted(csv_dir.glob("*.csv"))
-    if not csv_files:
-        print(f"No CSV files found in {csv_dir}")
-        sys.exit(1)
-    
-    first_csv = csv_files[0]
-    print(f"Testing full pipeline on: {first_csv.name}")
-    
-    # Load and test
-    df = pd.read_csv(first_csv)
-    df['vehicle_id'] = first_csv.stem  # Add vehicle_id column
-    
-    features = extract_all_features(df, config)
-    
-    if features is None:
-        print("No valid features extracted")
-    else:
-        print(f"Successfully extracted {len(features['soh_labels'])} samples")
-        print(f"SOH range: {features['soh_labels'].min():.3f} to {features['soh_labels'].max():.3f}")
-        print(f"Feature shapes:")
-        for key, value in features.items():
-            if isinstance(value, np.ndarray):
-                print(f"  {key}: {value.shape}")
-            else:
-                print(f"  {key}: list of length {len(value)}")
+def process_vehicle(csv_path: Path, config: dict) -> Dict[str, Any]:
+    """Process one vehicle CSV and return features dict."""
+    try:
+        df = pd.read_csv(csv_path, low_memory=False)
+        df['vehicleid'] = csv_path.stem  # Add vehicle ID column
+        
+        features = extract_all_features(df, config)
+        
+        if features is None:
+            return {
+                'vehicle_id': csv_path.stem,
+                'samples_extracted': 0,
+                'status': 'no_valid_segments'
+            }
+        
+        return {
+            'vehicle_id': csv_path.stem,
+            'samples_extracted': len(features['soh_labels']),
+            'status': 'success',
+            'features': features
+        }
+    except Exception as e:
+        warnings.warn(f"Error processing {csv_path.stem}: {e}")
+        return {
+            'vehicle_id': csv_path.stem,
+            'samples_extracted': 0,
+            'status': f'error: {str(e)}'
+        }

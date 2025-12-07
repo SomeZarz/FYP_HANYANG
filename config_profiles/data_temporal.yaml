@@ -1,0 +1,25 @@
+# === OCV Calibration (Accuracy-Critical) ===
+ocv_calibration:
+  min_rest_hours: 1.5          # Minimum rest for OCV stabilization
+  max_soc_start: 0.55           # Skip rest events with SOC > 60%
+  ocv_table_path: null         # Set to "ocv_lfp.csv" for LFP batteries
+
+# === Charging Detection (Field Data Essential) ===
+charging:
+  status_value: 3              # BMS status code for charging
+  accept_partial_charges: true # CRITICAL: Must be true for real-world data
+  full_charge_soc_threshold: 0.97  # Battery fully charged SOC threshold
+  full_charge_voltage_v: 4.24  # Max cell voltage at full charge
+
+# === Quality Thresholds (Sampling Frequency-Dependent) ===
+quality_checks:
+  min_samples_in_window: 45    # Min points in 3900-4050mV range
+  max_gap_seconds: 15          # Max allowed gap between samples
+  current_bounds_a: [5, 200]   # Charging current min/max (dataset-specific)
+  current_sign_convention: physical  # 'physical', 'inverted', or 'forcepositive'
+  voltage_smoothing: savgol  # 'interpolation', 'savgol', or 'movingaverage'
+
+# === SOH Calculation (Paper-Specified) ===
+soh_calculation:
+  soh_bounds: [0.4, 1.2]       # Valid SOH range (allow 20% overhead)
+  min_abs_delta_soc: 0.04      # Minimum SOC change for valid calculation

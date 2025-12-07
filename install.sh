@@ -5,7 +5,7 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" >/dev/null 2>&1 && pwd)"
 INSTALL_DIR="${ROOT_DIR}/install"
 
-chmod +x install/ds_b580.sh
+chmod +x install/ds_b580_arch.sh
 chmod +x install/ds_macos.sh
 
 echo " Author: SomeZarz"

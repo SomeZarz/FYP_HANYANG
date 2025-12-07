@@ -1,30 +1,23 @@
-# --- Orchestration ---
-orchestration:
-  data_profile: "data_paper" # Options: data_paper / data_modified / data_suggest
-  model_profile: "model_paper" # Options: model_paper / model_modified / model_suggest
-  profiles_dir: "config_profiles"
+# --- Core orchestration ---
+# Options: data_paper, data_sample, data_strict, data_lenient, data_current, data_voltage, data_temporal, data_final
+data_profile: data_final 
+dataset_name: sample  # Options: raw, sample, sample_mini
 
-# --- Dataset Configuration ---
+# === Paths ===
 paths:
-  # Data Inputs
-  dataset_dir: "data"
-  dataset_name: "sample" # Options: sample_mini, sample, paper
+  datasetdir: data
   csv_pattern: "*.csv"
-  # Data Outputs
-  extracted_data_dir: "data_extracted"
-  hdf5_filename: "{dataset_name}.h5"
-  hdf5path: "{extracted_data_dir}/{data_profile}_{dataset_name}.h5"
-  data_checkpoint_filename: "{extracted_data_dir}/{data_profile}_{dataset_name}_checkpoint.json"
-  # Model Checkpoints
-  checkpoint_dir: "checkpoints/{model_profile}"
+  extracted_datadir: data_extracted
+  hdf5_filename: "{data_profile}_{dataset_name}.h5"
+  checkpoint_dir: checkpoints
 
-# --- Static Dataset Metadata ---
+# === Dataset Hardware (Vehicle-Specific) ===
 dataset:
-  rated_capacity_ah: 155.0
-  num_cells: 96
-  voltage_window_mv: [3900, 4050]
+  rated_capacity_ah: 155.0      # From vehicle spec sheet (NCM pack)
+  num_cells: 96                 # Cells in series (96 for NCM, 108 for some LFP)
+  voltage_window_mv: [3750, 4050]  # Chemistry-dependent extraction window, 3750 for final
 
-# --- Placeholder (profile override) ---
-processing: {}
-model: {}
-training: {}
+# === Processing Reference ===
+processing:
+  config_file: "{data_profile}.yaml"  # Will be resolved to config_profiles/{data_profile}.yaml
+  parallel_batch_size: 6          # CPU cores - 2 (adjust for your hardware)
