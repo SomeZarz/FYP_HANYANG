@@ -58,6 +58,7 @@ source "${ENV_NAME}/bin/activate"
 pip install "torch==2.7.0" "torchvision==0.22.0" "torchaudio==2.7.0" --index-url https://download.pytorch.org/whl/xpu
 pip install "intel-extension-for-pytorch==2.7.0" -f https://software.intel.com/ipex-whl-stable
 # Data / ML stack
+pip install polars
 pip install pandas==2.3.3 numpy==1.26.4 scipy==1.16.3 scikit-learn==1.7.2 tqdm==4.67.1 pyyaml==6.0.3 h5py==3.15.1
 # Visualization
 pip install matplotlib==3.10.7 seaborn==0.13.2 memory-profiler==0.61.0

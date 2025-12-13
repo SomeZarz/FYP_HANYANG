@@ -1,23 +1,32 @@
-# --- Core orchestration ---
-# Options: data_paper, data_sample, data_strict, data_lenient, data_current, data_voltage, data_temporal, data_final
-data_profile: data_final 
-dataset_name: sample  # Options: raw, sample, sample_mini
+# -- Orchestration --
+# High-level pipeline configuration that selects processing profiles and dataset variants
+# These settings control which parameter sets and data sources to use
+orchestration:
+  # Feature Extraction Profile
+  data_profile: "data_sample"  # Selects preprocessing/extraction parameter file from config_profiles/data_profiles/. Options: data_paper (paper replication), data_sample (project defaults). Changing this switches all preprocessing thresholds simultaneously
+  
+  # Model Settings Profile  
+  model_profile: "model_paper"  # Selects model architecture/hyperparameter file from config_profiles/model_profiles/. Options: model_paper (baseline architecture). Changing this requires restart of training pipeline
+  
+  # Dataset
+  dataset_name: "sample"  # Selects dataset variant from data/ directory. Options: sample (full dataset), sample_mini (10% subset for testing), sample_plus (full + synthetic data), raw (unprocessed). Changing this affects training time and model performance
 
-# === Paths ===
+
+# -- Static Paths --
+# Directory structure definitions for config and data storage
+# These paths are relative to project root and control file I/O locations
 paths:
-  datasetdir: data
-  csv_pattern: "*.csv"
-  extracted_datadir: data_extracted
-  hdf5_filename: "{data_profile}_{dataset_name}.h5"
-  checkpoint_dir: checkpoints
+  data_profile_dir : "config_profiles/data_profiles"  # Location of preprocessing configuration files. Changing this reorganizes config directory structure - must update all profile references
+  model_profile_dir : "config_profiles/model_profiles"  # Location of model architecture files. Changing this requires moving all model configs to new location
+  dataset_dir: "data"  # Root directory containing raw battery data files. Changing this requires moving all .parquet/.csv data or updating symlinks
+  extracted_data_dir: "data_extracted"  # Output directory for processed features and labels. Changing this separates experiment outputs - useful for versioning different preprocessing runs
 
-# === Dataset Hardware (Vehicle-Specific) ===
-dataset:
-  rated_capacity_ah: 155.0      # From vehicle spec sheet (NCM pack)
-  num_cells: 96                 # Cells in series (96 for NCM, 108 for some LFP)
-  voltage_window_mv: [3750, 4050]  # Chemistry-dependent extraction window, 3750 for final
 
-# === Processing Reference ===
-processing:
-  config_file: "{data_profile}.yaml"  # Will be resolved to config_profiles/{data_profile}.yaml
-  parallel_batch_size: 6          # CPU cores - 2 (adjust for your hardware)
+# -- Performance --
+# Computational efficiency settings that control resource usage and processing speed
+# These parameters trade memory usage against processing time
+performance:
+  polars_threads: 0  # Number of threads for Polars operations: 0 = use all CPU cores, N = limit to N threads. Higher values increase speed but consume more memory. Lower values reduce memory footprint at cost of speed
+  dtype: "float32"  # Numerical precision for feature arrays: float32 (half memory, sufficient accuracy), float64 (double memory, higher precision). Changing this halves/doubles memory usage and affects model training speed
+  batch_size: 32    # Number of samples processed together in extraction pipeline. Larger values increase vectorization efficiency (faster) but require more memory. Smaller values reduce memory but increase overhead
+  verbose: false    # Debug print statements: true enables progress logging (slower, more I/O), false disables (faster, cleaner logs). True useful for debugging preprocessing issues

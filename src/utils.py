@@ -1,33 +1,31 @@
-import yaml
+# src/utils.py
+
 from pathlib import Path
+from typing import Dict, Any
+import yaml
 
-def load_config(config_path: str) -> dict:
-    """Load and resolve config with profile merging from config_profiles/."""
-    config_path = Path(config_path)
+def open_config(path_to_open: str) -> Dict[str, Any]:
+    with open(path_to_open, 'r') as f:
+        config_name = yaml.safe_load(f)
+
+    return config_name
+
+def load_config(config_path: str) -> Dict[str, Any]:
+    # Opening the main config
+    config_path = Path(config_path).resolve()
+    config = open_config(config_path)
+
+    # Resolving profile paths
+    data_profile_path = f"{config['paths']['data_profile_dir']}/{config['orchestration']['data_profile']}.yaml"
+    model_profile_path = f"{config['paths']['model_profile_dir']}/{config['orchestration']['model_profile']}.yaml"
     
-    with open(config_path) as f:
-        config = yaml.safe_load(f)
-    
-    # Extract values for template substitution
-    data_profile = config['data_profile']
-    dataset_name = config['dataset_name']
-    
-    # Format HDF5 filename with actual values
-    hdf5_template = config['paths']['hdf5_filename']
-    config['paths']['hdf5_filename'] = hdf5_template.format(
-        data_profile=data_profile, 
-        dataset_name=dataset_name
-    )
-    
-    # Construct profile file path and merge
-    profile_path = config_path.parent / 'config_profiles' / f"{data_profile}.yaml"
-    
-    if profile_path.exists():
-        with open(profile_path) as f:
-            profile = yaml.safe_load(f)
-        config.update(profile)
-    else:
-        print(f"Warning: Profile not found at {profile_path}")
-    
+    # Opening the profile configs
+    data_profile = open_config(data_profile_path)
+    model_profile = open_config(model_profile_path)
+
+    # Merge profiles into config
+    config['dataset'] = data_profile.get('dataset', {})
+    config['preprocessing'] = data_profile.get('preprocessing', {})
+    config['extraction'] = data_profile.get('extraction', {})
+
     return config
-

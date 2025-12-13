@@ -40,8 +40,11 @@ fi
 
 echo -e "\nActivating VE & PIP install"
 source "fyp_hanyang/bin/activate"
+# Core Data Extraction
+pip install polars
 # Core PyTorch + vision/audio
 pip install torch==2.9.1 torchaudio==2.9.1 torchvision==0.24.1
+
 # Data / ML stack
 pip install pandas==2.3.3 numpy==1.26.4 scipy==1.16.3 scikit-learn==1.7.2 tqdm==4.67.1 pyyaml==6.0.3 h5py==3.15.1
 # Visualization

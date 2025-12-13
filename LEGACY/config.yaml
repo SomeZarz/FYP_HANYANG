@@ -1,0 +1,24 @@
+# --- Core orchestration ---
+# Options: data_paper, data_sample, data_strict, data_lenient, data_current, data_voltage, data_temporal, data_final
+data_profile: data_final 
+model_profile: model_final
+dataset_name: sample  # Options: raw, sample, sample_mini
+
+# === Paths ===
+paths:
+  datasetdir: data
+  csv_pattern: "*.csv"
+  extracted_datadir: data_extracted
+  hdf5_filename: "{data_profile}_{dataset_name}.h5"
+  checkpoint_dir: checkpoints
+
+# === Dataset Hardware (Vehicle-Specific) ===
+dataset:
+  rated_capacity_ah: 155.0      # From vehicle spec sheet (NCM pack)
+  num_cells: 96                 # Cells in series (96 for NCM, 108 for some LFP)
+  voltage_window_mv: [3750, 4050]  # Chemistry-dependent extraction window, 3750 for final
+
+# === Processing Reference ===
+processing:
+  config_file: "{data_profile}.yaml"  # Will be resolved to config_profiles/{data_profile}.yaml
+  parallel_batch_size: 6          # CPU cores - 2 (adjust for your hardware)

@@ -52,7 +52,7 @@ def voltage_to_soc(voltage_mv: float, ocv_table_path: Optional[Path] = None) -> 
 
 def detect_rest_periods(df: pd.DataFrame, config: dict) -> List[Dict[str, Any]]:
     """Detect rest periods and calibrate SOC via OCV."""
-    df = df.copy().sort_values('terminaltime').reset_index(drop=True)
+    df = df.sort_values('terminaltime').reset_index(drop=True)
     
     min_gap = config['ocv_calibration']['min_rest_hours'] * 3600
     max_soc = config['ocv_calibration']['max_soc_start']
@@ -104,7 +104,7 @@ def identify_charging_segments(df: pd.DataFrame, rest_events: List[dict], config
         
         # Get the full charging session
         charging_start_idx = post_rest[charging_mask].index[0]
-        segment_df = post_rest.iloc[charging_start_idx:].copy()
+        segment_df = post_rest.iloc[charging_start_idx:]
         
         # Find where voltage window occurs within this charging session
         voltages = segment_df['maxvoltagebattery'].values * 1000
@@ -123,7 +123,7 @@ def identify_charging_segments(df: pd.DataFrame, rest_events: List[dict], config
         # Extract only the window portion
         window_start = window_indices[0]
         window_end = window_indices[-1]
-        window_df = segment_df.iloc[window_start:window_end + 1].copy()
+        window_df = segment_df.iloc[window_start:window_end + 1]
         
         # Check for gaps WITHIN the window (not the parking period before)
         time_gaps = window_df['terminaltime'].diff().dropna()
@@ -141,7 +141,6 @@ def identify_charging_segments(df: pd.DataFrame, rest_events: List[dict], config
 
 def validate_and_clean_segment(segment_df: pd.DataFrame, config: dict) -> Tuple[pd.DataFrame, dict]:
     """Apply data quality corrections and return cleaned segment."""
-    segment_df = segment_df.copy()
     flags = {}
 
     '''
@@ -280,7 +279,7 @@ def extract_qhi_thi(segment_df: pd.DataFrame, config: dict) -> Tuple[np.ndarray,
     if not in_window.any():
         raise ValueError("No data in voltage window")
     
-    window_df = segment_df[in_window].copy()
+    window_df = segment_df[in_window]
     
     # Extract values
     voltage_points = window_df['maxvoltagebattery'].values * 1000
@@ -409,7 +408,6 @@ def extract_scalar_features(segment_df: pd.DataFrame, qhi_raw: np.ndarray, thi_r
 
 def extract_all_features(df: pd.DataFrame, config: dict) -> Optional[Dict[str, Any]]:
     """Full feature extraction pipeline for one vehicle."""
-    df = df.copy()
     ''' VEHICLE ID LOGGING '''
     vehicle_id = df.get('vehicleid', ['unknown'])[0]
     

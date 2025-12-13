@@ -1,0 +1,44 @@
+# -- Dataset Properties --
+# Fundamental battery pack specifications that define operational boundaries
+# and baseline calculations for the entire pipeline
+dataset:
+  rated_capacity_ah: 155.0  # Rated capacity of battery pack (Ah) - used as SOH calculation denominator. Lower values increase calculated SOH for same charge amount
+  num_cells: 96  # Number of cells in series - determines voltage map dimensions [96, 1]. Changing this reshapes all cell-wise feature tensors
+  max_voltage_threshold: 4.25  # Maximum cell voltage (V) - physical limit for charge termination. Higher values risk cell damage detection, lower values may prematurely stop charge detection
+
+
+# -- Preprocessing --
+# Data cleaning and segment identification parameters that control data quality
+# and valid region extraction
+preprocessing:
+  # Data Cleaning  
+  # Basic filtering to remove sensor errors and physical impossibilities
+  max_current_threshold: 500.0  # Maximum allowed current magnitude (A) - filters sensor errors and impossible spikes. Lower values discard more aggressive driving/charging data
+  current_sign_convention: "positive"  # Current sign handling: "positive" for absolute values, "negative" for inverted absolute values. Affects coulomb counting direction - must match sensor orientation
+  enable_voltage_smoothing: False  # Toggle voltage smoothing - reduces EMI artifacts but may obscure real voltage transients. True trades measurement accuracy for noise reduction
+  smoothing_window: 5  # Rolling mean window size in samples - fixed window size for simple smoothing. Larger windows increase lag and filter more noise
+
+
+  # Rest Segment Extraction
+  # Identifies valid rest periods for OCV-based SOC calibration
+  gap_period: 3600  # Minimum time gap (seconds) to identify a new rest segment. Larger values find fewer, longer rests (more reliable OCV), smaller values find more segments (more data but lower quality)
+
+
+  # SoC Calibration
+  # Parameters for OCV-based state of charge estimation during rest periods
+  min_sample: 100  # Minimum data points required in rest window. Higher values discard short segments (fewer OCV points), lower values accept more rests but risk unreliable OCV from insufficient samples
+  current_at_rest: 5.0  # Maximum allowable current magnitude (A) during rest. Higher values accept more noisy rests (more data), lower values enforce stricter idle conditions (better OCV accuracy)
+  depolarization_period: 3600  # Seconds after rest start before measuring OCV. Longer periods improve OCV accuracy by allowing cell depolarization but reduce usable rest segments by requiring longer rests
+  max_soc_threshold: 0.6  # Maximum calibrated SOC to accept a rest segment. Higher values include more segments (more training data) but risk inaccurate OCV at high SOC where voltage-SOC curve is flat
+
+
+  # Identify Capacity Segment
+  # Defines the charge region used for SOH calculation
+  full_charge_threshold: 4.14  # Voltage threshold (V) to detect full charge completion. Higher values detect later in charge cycle (more accurate capacity), lower values may trigger prematurely before true full charge
+
+
+# -- Feature Extraction --
+# Controls the feature engineering process for model input generation
+extraction:
+  min_voltage_threshold: 3.9  # Minimum voltage for feature map normalization (V) - defines lower bound for voltage map scaling. Values below this clamp to 0 in voltage maps
+  feature_extraction_max_voltage: 4.05  # Maximum voltage for feature map normalization (V) - defines upper bound for voltage map scaling. Values above this clamp to 1 in voltage maps

@@ -1,0 +1,36 @@
+# === Model Architecture (Multi-Modal SOH) ===
+model:
+  # Options: "resnet" (paper baseline), "transformer" (your variant)
+  architecture: transformer
+
+  # Shared embedding dimension for all three modalities
+  embed_dim: 32
+
+  # Sequence length for QHI / THI (fixed by data pipeline)
+  seq_len: 151
+
+  # Transformer-specific settings (ignored when architecture == "resnet")
+  nhead: 4          # Number of attention heads
+  num_layers: 2     # Encoder layers
+
+# === Training Hyperparameters ===
+training:
+  # Batch size for train / val / test DataLoaders
+  batch_size: 4
+
+  # Number of training epochs
+  num_epochs: 10
+
+  # Optimizer settings (Adam is hardcoded in train.py)
+  learning_rate: 5.0e-5
+  weight_decay: 1.0e-3
+
+  # Early stopping based on validation MAPE
+  patience: 3
+
+  # Optional gradient clipping (set to null to disable)
+  grad_clip_norm: 1.0
+
+  # Warm-up epochs before exponential LR decay
+  warmup_epochs: 5
+
